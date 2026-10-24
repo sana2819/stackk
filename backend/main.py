@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from decimal import Decimal, ROUND_HALF_UP
 from typing import List
@@ -8,10 +9,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import ForeignKey, Integer, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
-DATABASE_URL = "sqlite:///./expenses.db"
+DB_DIR = "/tmp" if os.environ.get("VERCEL") else "."
+DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{os.path.join(DB_DIR, 'expenses.db')}")
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -107,14 +109,23 @@ async def lifespan(app: FastAPI):
     yield
 
 
+
 app = FastAPI(title="SplitWise Lite API", version="1.0.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_origin_regex=r"^https:\/\/.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 def get_db():

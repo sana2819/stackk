@@ -6,13 +6,15 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const rawApi = import.meta.env.VITE_API_URL || "";
+const API = rawApi.replace(/\/+$/, "");
 const currency = (value) => new Intl.NumberFormat("en-IN", {
   style: "currency", currency: "INR", maximumFractionDigits: 2
 }).format(Number(value || 0));
 
 async function request(path, options = {}) {
-  const response = await fetch(`${API}${path}`, {
+  const url = API ? `${API}${path}` : path;
+  const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
     ...options
   });
@@ -68,7 +70,7 @@ function App() {
       const chosen = await loadGroups(preferredId);
       await loadGroup(chosen?.id);
     } catch (e) {
-      setError(`${e.message}. Is the FastAPI backend running on port 8000?`);
+      setError(e.message || "Failed to connect to the backend API.");
     } finally { setLoading(false); }
   }
 
