@@ -11,6 +11,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 
 DB_DIR = "/tmp" if os.environ.get("VERCEL") else "."
 DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{os.path.join(DB_DIR, 'expenses.db')}")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
@@ -177,88 +180,26 @@ def create_group(payload: GroupCreate, db: Session = Depends(get_db)):
     return group_payload(group)
 
 
-@app.get("/api/groups/{group_id}")
-def get_group(group_id: int, db: Session = Depends(get_db)):
-    return group_payload(group_or_404(db, group_id))
-
-
-@app.post("/api/groups/{group_id}/expenses", status_code=201)
-def create_expense(group_id: int, payload: ExpenseCreate, db: Session = Depends(get_db)):
-    group = group_or_404(db, group_id)
-    member_ids = {m.id for m in group.members}
-    if payload.payer_id not in member_ids:
-        raise HTTPException(status_code=400, detail="Payer must be a member of this group")
-    if not group.members:
-        raise HTTPException(status_code=400, detail="Add group members first")
-
-    amount_paise = int(
-        (payload.amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    )
-    if amount_paise < 1:
-        raise HTTPException(status_code=400, detail="Amount must be at least ₹0.01")
-
-    expense = Expense(
-        description=payload.description,
-        amount_paise=amount_paise,
-        group_id=group.id,
-        payer_id=payload.payer_id,
-    )
-
-    # Split paise evenly; any remainder paise are assigned one at a time
-    # to the first members, ensuring shares add up exactly to the expense.
-    members = sorted(group.members, key=lambda m: m.id)
-    base_share, remainder = divmod(amount_paise, len(members))
-    expense.shares = [
-        ExpenseShare(
-            member_id=member.id,
-            amount_paise=base_share + (1 if index < remainder else 0),
-        )
-        for index, member in enumerate(members)
-    ]
-    db.add(expense)
-    db.commit()
-    db.refresh(expense)
+def expense_payload(e: Expense):
     return {
-        "id": expense.id,
-        "description": expense.description,
-        "amount": money_from_paise(expense.amount_paise),
-        "payer_id": expense.payer_id,
-        "payer_name": expense.payer.name,
-        "created": True,
+        "id": e.id,
+        "description": e.description,
+        "amount": money_from_paise(e.amount_paise),
+        "payer_id": e.payer_id,
+        "payer_name": e.payer.name,
+        "shares": [
+            {
+                "member_id": share.member_id,
+                "member_name": share.member.name,
+                "amount": money_from_paise(share.amount_paise),
+            }
+            for share in e.shares
+        ],
     }
 
 
-@app.get("/api/groups/{group_id}/expenses")
-def list_expenses(group_id: int, db: Session = Depends(get_db)):
-    group_or_404(db, group_id)
-    expenses = db.scalars(
-        select(Expense).where(Expense.group_id == group_id).order_by(Expense.id.desc())
-    ).all()
-    return [
-        {
-            "id": e.id,
-            "description": e.description,
-            "amount": money_from_paise(e.amount_paise),
-            "payer_id": e.payer_id,
-            "payer_name": e.payer.name,
-            "shares": [
-                {
-                    "member_id": share.member_id,
-                    "member_name": share.member.name,
-                    "amount": money_from_paise(share.amount_paise),
-                }
-                for share in e.shares
-            ],
-        }
-        for e in expenses
-    ]
-
-
-@app.get("/api/groups/{group_id}/balances")
-def group_balances(group_id: int, db: Session = Depends(get_db)):
-    group = group_or_404(db, group_id)
+def compute_group_balances(group: Group, expenses: List[Expense]):
     totals = {m.id: {"paid": 0, "owed": 0, "name": m.name} for m in group.members}
-    expenses = db.scalars(select(Expense).where(Expense.group_id == group_id)).all()
 
     for expense in expenses:
         totals[expense.payer_id]["paid"] += expense.amount_paise
@@ -315,3 +256,77 @@ def group_balances(group_id: int, db: Session = Depends(get_db)):
         "settlements": settlements,
         "total_expenses": money_from_paise(sum(e.amount_paise for e in expenses)),
     }
+
+
+@app.get("/api/groups/{group_id}")
+def get_group(group_id: int, db: Session = Depends(get_db)):
+    group = group_or_404(db, group_id)
+    expenses = db.scalars(
+        select(Expense).where(Expense.group_id == group_id).order_by(Expense.id.desc())
+    ).all()
+    payload = group_payload(group)
+    payload["expenses"] = [expense_payload(e) for e in expenses]
+    payload["summary"] = compute_group_balances(group, expenses)
+    return payload
+
+
+@app.post("/api/groups/{group_id}/expenses", status_code=201)
+def create_expense(group_id: int, payload: ExpenseCreate, db: Session = Depends(get_db)):
+    group = group_or_404(db, group_id)
+    member_ids = {m.id for m in group.members}
+    if payload.payer_id not in member_ids:
+        raise HTTPException(status_code=400, detail="Payer must be a member of this group")
+    if not group.members:
+        raise HTTPException(status_code=400, detail="Add group members first")
+
+    amount_paise = int(
+        (payload.amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    if amount_paise < 1:
+        raise HTTPException(status_code=400, detail="Amount must be at least ₹0.01")
+
+    expense = Expense(
+        description=payload.description,
+        amount_paise=amount_paise,
+        group_id=group.id,
+        payer_id=payload.payer_id,
+    )
+
+    # Split paise evenly; any remainder paise are assigned one at a time
+    # to the first members, ensuring shares add up exactly to the expense.
+    members = sorted(group.members, key=lambda m: m.id)
+    base_share, remainder = divmod(amount_paise, len(members))
+    expense.shares = [
+        ExpenseShare(
+            member_id=member.id,
+            amount_paise=base_share + (1 if index < remainder else 0),
+        )
+        for index, member in enumerate(members)
+    ]
+    db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return {
+        "id": expense.id,
+        "description": expense.description,
+        "amount": money_from_paise(expense.amount_paise),
+        "payer_id": expense.payer_id,
+        "payer_name": expense.payer.name,
+        "created": True,
+    }
+
+
+@app.get("/api/groups/{group_id}/expenses")
+def list_expenses(group_id: int, db: Session = Depends(get_db)):
+    group_or_404(db, group_id)
+    expenses = db.scalars(
+        select(Expense).where(Expense.group_id == group_id).order_by(Expense.id.desc())
+    ).all()
+    return [expense_payload(e) for e in expenses]
+
+
+@app.get("/api/groups/{group_id}/balances")
+def group_balances(group_id: int, db: Session = Depends(get_db)):
+    group = group_or_404(db, group_id)
+    expenses = db.scalars(select(Expense).where(Expense.group_id == group_id)).all()
+    return compute_group_balances(group, expenses)

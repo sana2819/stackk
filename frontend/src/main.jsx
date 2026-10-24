@@ -55,20 +55,29 @@ function App() {
     if (!id) {
       setGroup(null); setExpenses([]); setSummary(null); return;
     }
-    const [g, e, b] = await Promise.all([
-      request(`/api/groups/${id}`),
-      request(`/api/groups/${id}/expenses`),
-      request(`/api/groups/${id}/balances`)
-    ]);
-    setGroup(g); setExpenses(e); setSummary(b);
-    setPayerId(current => g.members.some(m => String(m.id) === String(current)) ? current : String(g.members[0]?.id || ""));
+    const data = await request(`/api/groups/${id}`);
+    setGroup(data);
+    setExpenses(data.expenses || []);
+    setSummary(data.summary || null);
+    setPayerId(current => data.members?.some(m => String(m.id) === String(current)) ? current : String(data.members?.[0]?.id || ""));
+    return data;
   }
 
   async function refresh(preferredId = activeId) {
     setLoading(true); setError("");
     try {
-      const chosen = await loadGroups(preferredId);
-      await loadGroup(chosen?.id);
+      const list = await request("/api/groups");
+      setGroups(list);
+      const chosen = list.find(g => String(g.id) === String(preferredId)) || list[0];
+      if (chosen) {
+        setActiveId(String(chosen.id));
+        await loadGroup(chosen.id);
+      } else {
+        setActiveId("");
+        setGroup(null);
+        setExpenses([]);
+        setSummary(null);
+      }
     } catch (e) {
       setError(e.message || "Failed to connect to the backend API.");
     } finally { setLoading(false); }
@@ -76,7 +85,9 @@ function App() {
 
   useEffect(() => { refresh(""); }, []);
   useEffect(() => {
-    if (activeId) loadGroup(activeId).catch(e => setError(e.message));
+    if (activeId && (!group || String(group.id) !== String(activeId))) {
+      loadGroup(activeId).catch(e => setError(e.message));
+    }
   }, [activeId]);
 
   async function createGroup(event) {
@@ -87,7 +98,26 @@ function App() {
         method: "POST", body: JSON.stringify({ name: groupName, members })
       });
       setGroupName(""); setShowGroupForm(false);
-      await refresh(String(created.id));
+
+      const initialSummary = {
+        group_id: created.id,
+        group_name: created.name,
+        balances: created.members.map(m => ({ member_id: m.id, name: m.name, paid: 0, share: 0, net: 0 })),
+        settlements: [],
+        total_expenses: 0
+      };
+      const initialGroup = {
+        ...created,
+        expenses: [],
+        summary: initialSummary
+      };
+
+      setGroup(initialGroup);
+      setExpenses([]);
+      setSummary(initialSummary);
+      setPayerId(String(created.members[0]?.id || ""));
+      setActiveId(String(created.id));
+      setGroups(prev => [created, ...prev.filter(g => String(g.id) !== String(created.id))]);
       setNotice("Group created. Add your first expense.");
     } catch (e) { setError(e.message); }
   }
@@ -100,7 +130,8 @@ function App() {
         body: JSON.stringify({ description, amount: Number(amount), payer_id: Number(payerId) })
       });
       setDescription(""); setAmount(""); setShowExpenseForm(false);
-      await refresh(activeId);
+      await loadGroup(activeId);
+      request("/api/groups").then(setGroups).catch(() => {});
       setNotice("Expense saved and balances recalculated.");
     } catch (e) { setError(e.message); }
   }
